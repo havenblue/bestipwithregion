@@ -61,7 +61,8 @@ jobs:
           function getIpLocation(ip) {
             return new Promise((resolve) => {
               try {
-                const url = `http://ip-api.com/json/${ip}?fields=countryCode`;
+                // 使用HTTPS而不是HTTP，避免安全问题
+                const url = `https://ip-api.com/json/${ip}?fields=status,countryCode`;
                 https.get(url, (res) => {
                   let data = '';
                   
@@ -71,22 +72,30 @@ jobs:
                   
                   res.on('end', () => {
                     try {
+                      console.log(`Debug: 响应数据 for ${ip}: ${data}`); // 添加调试日志
                       const result = JSON.parse(data);
-                      // 返回国家代码，如果查询失败返回'Unknown'
-                      const countryCode = result.status === 'success' ? result.countryCode : 'Unknown';
-                      resolve(countryCode);
+                      
+                      // 修正大小写敏感性问题，统一返回小写'unknown'
+                      // 确保status字段存在且正确判断
+                      if (result && result.status && result.status.toLowerCase() === 'success' && result.countryCode) {
+                        console.log(`Debug: ${ip} 归属地查询成功: ${result.countryCode}`);
+                        resolve(result.countryCode);
+                      } else {
+                        console.log(`Debug: ${ip} 归属地查询失败，响应状态: ${result?.status || 'undefined'}`);
+                        resolve('unknown');
+                      }
                     } catch (error) {
                       console.error(`解析IP ${ip} 归属地数据失败: ${error.message}`);
-                      resolve('Unknown');
+                      resolve('unknown');
                     }
                   });
                 }).on('error', (e) => {
                   console.error(`查询IP ${ip} 归属地失败: ${e.message}`);
-                  resolve('Unknown');
+                  resolve('unknown');
                 });
               } catch (error) {
                 console.error(`查询IP ${ip} 归属地时发生错误: ${error.message}`);
-                resolve('Unknown');
+                resolve('unknown');
               }
             });
           }
