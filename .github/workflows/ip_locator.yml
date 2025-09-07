@@ -105,17 +105,20 @@ jobs:
             try {
               // 从环境变量或默认值获取URL
               const url = process.env.IP_LIST_URL || 'https://raw.githubusercontent.com/tianshipapa/cfipcaiji/refs/heads/main/ip.txt';
-              
+              console.log(`Debug: 使用的IP列表URL: ${url}`);
+               
               // 获取IP列表
               const ips = await getIpsFromUrl(url);
               if (!ips || ips.length === 0) {
                 console.log('没有获取到IP地址');
                 return;
               }
-              
+               
+              console.log(`Debug: 成功获取到 ${ips.length} 个IP地址`);
+               
               // 创建结果列表
               const results = [];
-              
+               
               // 逐个处理IP地址
               for (const ip of ips) {
                 const trimmedIp = ip.trim();
@@ -127,11 +130,15 @@ jobs:
                   console.log(`无效的IP地址: ${trimmedIp}`);
                 }
               }
-              
+               
               // 写入结果到ip.txt文件
               fs.writeFileSync('ip.txt', results.join('\n'), { encoding: 'utf-8' });
-              
-              console.log(`共处理 ${results.length} 个有效IP地址，结果已保存到ip.txt`);
+               
+              // 统计成功和失败的数量
+              const successCount = results.filter(line => !line.endsWith('#unknown')).length;
+              const failCount = results.filter(line => line.endsWith('#unknown')).length;
+               
+              console.log(`共处理 ${results.length} 个有效IP地址，其中成功: ${successCount} 个，失败: ${failCount} 个，结果已保存到ip.txt`);
             } catch (error) {
               console.error(`执行过程中发生错误: ${error.message}`);
               process.exit(1);
