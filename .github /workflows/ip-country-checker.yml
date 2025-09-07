@@ -1,0 +1,63 @@
+name: IP地址国家归属检查
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天午夜执行一次
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  check-ip-country:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y geoip-bin
+          
+      - name: 检查IP地址归属国家
+        run: |
+          # 创建临时文件存储结果
+          touch ip_with_country.txt
+          
+          # 下载最新的IP清单
+          if [ -f "ip.txt" ]; then
+            echo "正在处理本地ip.txt文件..."
+            IP_FILE="ip.txt"
+          else
+            echo "正在下载远程IP清单..."
+            curl -o ip.txt "https://raw.githubusercontent.com/tianshipapa/cfipcaiji/refs/heads/main/ip.txt"
+            IP_FILE="ip.txt"
+          fi
+          
+          # 读取并处理每个IP地址
+          while IFS= read -r ip || [[ -n "$ip" ]]; do
+            # 跳过空行和已包含国家标签的行
+            if [[ -z "$ip" || "$ip" == *"#"* ]]; then
+              echo "$ip" >> ip_with_country.txt
+              continue
+            fi
+            
+            # 获取IP地址的国家代码
+            country_code=$(geoiplookup "$ip" | grep -oP 'Country Code: \K\w+' || echo "UNKNOWN")
+            
+            # 格式化结果，添加国家标签
+            echo "$ip #$country_code" >> ip_with_country.txt
+            echo "处理IP: $ip -> 国家代码: $country_code"
+          done < "$IP_FILE"
+          
+          # 用新文件替换旧文件
+          mv ip_with_country.txt ip.txt
+          
+      - name: 提交更改
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: '自动更新IP地址国家归属标签'
+          branch: ${{ github.ref }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
