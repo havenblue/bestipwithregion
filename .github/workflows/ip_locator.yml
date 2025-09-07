@@ -62,19 +62,19 @@ jobs:
             return new Promise(resolve => setTimeout(resolve, ms));
           }
           
-          // 主查询函数 - 使用ip-api.com
-          async function queryWithIpApi(ip) {
+          // 主查询函数 - 使用ipapi.co
+          async function queryWithPrimaryApi(ip) {
             return new Promise((resolve) => {
               try {
                 const options = {
-                  hostname: 'ip-api.com',
-                  path: `/json/${ip}?fields=status,countryCode,message`,
+                  hostname: 'ipapi.co',
+                  path: `/${ip}/json/`,
                   headers: {
                     'User-Agent': 'IPLocationChecker/1.0 (Node.js)'
                   }
                 };
                 
-                console.log(`Debug: 发送ip-api.com查询请求 for ${ip}`);
+                console.log(`Debug: 发送ipapi.co查询请求 for ${ip}`);
                 
                 const req = https.get(options, (res) => {
                   let data = '';
@@ -83,28 +83,28 @@ jobs:
                   
                   res.on('end', () => {
                     try {
-                      console.log(`Debug: ip-api.com响应数据 for ${ip}: ${data}`);
+                      console.log(`Debug: ipapi.co响应数据 for ${ip}: ${data}`);
                       const result = JSON.parse(data);
                       
-                      if (result && result.status && result.status.toLowerCase() === 'success' && result.countryCode) {
-                        console.log(`Debug: ip-api.com查询成功: ${ip} -> ${result.countryCode}`);
-                        resolve({ success: true, countryCode: result.countryCode });
+                      if (result && result.country_code && result.country_code.length === 2) {
+                        console.log(`Debug: ipapi.co查询成功: ${ip} -> ${result.country_code}`);
+                        resolve({ success: true, countryCode: result.country_code });
                       } else {
-                        const errorMessage = result?.message || '未知错误';
-                        console.log(`Debug: ip-api.com查询失败，状态: ${result?.status || 'undefined'}，错误: ${errorMessage}`);
+                        const errorMessage = result?.reason || '未知错误';
+                        console.log(`Debug: ipapi.co查询失败，返回数据: ${JSON.stringify(result)}`);
                         resolve({ success: false, error: errorMessage });
                       }
                     } catch (error) {
-                      console.error(`解析ip-api.com响应失败: ${error.message}`);
+                      console.error(`解析ipapi.co响应失败: ${error.message}`);
                       resolve({ success: false, error: error.message });
                     }
                   });
                 }).on('error', (e) => {
-                  console.error(`ip-api.com请求错误: ${e.message}`);
+                  console.error(`ipapi.co请求错误: ${e.message}`);
                   resolve({ success: false, error: e.message });
                 });
               } catch (error) {
-                console.error(`ip-api.com调用异常: ${error.message}`);
+                console.error(`ipapi.co调用异常: ${error.message}`);
                 resolve({ success: false, error: error.message });
               }
             });
@@ -164,8 +164,8 @@ jobs:
               console.log(`Debug: IP ${ip} 查询前延迟 ${randomDelay}ms`);
               await delay(randomDelay);
               
-              // 首先尝试使用ip-api.com
-              let result = await queryWithIpApi(ip);
+              // 首先尝试使用主API(ipapi.co)
+              let result = await queryWithPrimaryApi(ip);
               
               // 如果失败，尝试使用备用API
               if (!result.success) {
@@ -185,7 +185,7 @@ jobs:
           async function main() {
             try {
               // 从环境变量或默认值获取URL
-              const url = process.env.IP_LIST_URL || 'https://raw.githubusercontent.com/ymyuuu/IPDB/refs/heads/main/BestCF/bestcfv4.txt';
+              const url = process.env.IP_LIST_URL || 'https://raw.githubusercontent.com/tianshipapa/cfipcaiji/refs/heads/main/ip.txt';
               console.log(`Debug: 使用的IP列表URL: ${url}`);
                
               // 获取IP列表
