@@ -1,4 +1,4 @@
-name: IP Address Location Checker
+name: IP地址归属地查询
 
 on:
   # 定时触发，每天运行一次
@@ -6,9 +6,6 @@ on:
     - cron: '0 0 * * *'
   # 允许手动触发
   workflow_dispatch:
-  # 可以添加其他触发条件，如push到特定分支
-  # push:
-  #   branches: [ main ]
 
 jobs:
   check-ip-locations:
@@ -20,85 +17,120 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 设置Python环境
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      # 设置Node.js环境
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          node-version: '18'
 
-      # 安装依赖
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests>=2.25.0
-
-      # 运行IP地址查询脚本（内嵌Python代码）
+      # 运行IP地址查询脚本（内嵌JavaScript代码）
       - name: Run IP locator script
         run: |
-          python - << 'EOF'
-          import requests
-          import re
-          import os
+          node << 'EOF'
+          const https = require('https');
+          const fs = require('fs');
+          const path = require('path');
           
-          # 从URL获取IP列表
-          def get_ips_from_url(url):
-              try:
-                  response = requests.get(url, timeout=10)
-                  response.raise_for_status()
-                  return response.text.strip().split('\n')
-              except Exception as e:
-                  print(f"获取IP列表失败: {e}")
-                  return []
+          // 从URL获取IP列表
+          function getIpsFromUrl(url) {
+            return new Promise((resolve, reject) => {
+              https.get(url, (res) => {
+                let data = '';
+                
+                res.on('data', (chunk) => {
+                  data += chunk;
+                });
+                
+                res.on('end', () => {
+                  resolve(data.trim().split('\n'));
+                });
+              }).on('error', (e) => {
+                console.error(`获取IP列表失败: ${e.message}`);
+                reject(e);
+              });
+            });
+          }
           
-          # 验证IP地址格式
-          def is_valid_ip(ip):
-              pattern = r'^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
-              return re.match(pattern, ip) is not None
+          // 验证IP地址格式
+          function isValidIp(ip) {
+            const pattern = /^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+            return pattern.test(ip);
+          }
           
-          # 查询IP归属地
-          def get_ip_location(ip):
-              try:
-                  # 使用ip-api.com服务查询IP归属地
-                  response = requests.get(f"http://ip-api.com/json/{ip}?fields=countryCode", timeout=5)
-                  response.raise_for_status()
-                  data = response.json()
-                  # 返回国家代码，如果查询失败返回'Unknown'
-                  return data.get('countryCode', 'Unknown') if data.get('status') == 'success' else 'Unknown'
-              except Exception as e:
-                  print(f"查询IP {ip} 归属地失败: {e}")
-                  return 'Unknown'
+          // 查询IP归属地
+          function getIpLocation(ip) {
+            return new Promise((resolve) => {
+              try {
+                const url = `http://ip-api.com/json/${ip}?fields=countryCode`;
+                https.get(url, (res) => {
+                  let data = '';
+                  
+                  res.on('data', (chunk) => {
+                    data += chunk;
+                  });
+                  
+                  res.on('end', () => {
+                    try {
+                      const result = JSON.parse(data);
+                      // 返回国家代码，如果查询失败返回'Unknown'
+                      const countryCode = result.status === 'success' ? result.countryCode : 'Unknown';
+                      resolve(countryCode);
+                    } catch (error) {
+                      console.error(`解析IP ${ip} 归属地数据失败: ${error.message}`);
+                      resolve('Unknown');
+                    }
+                  });
+                }).on('error', (e) => {
+                  console.error(`查询IP ${ip} 归属地失败: ${e.message}`);
+                  resolve('Unknown');
+                });
+              } catch (error) {
+                console.error(`查询IP ${ip} 归属地时发生错误: ${error.message}`);
+                resolve('Unknown');
+              }
+            });
+          }
           
-          # 主函数
-          def main():
-              # 从环境变量或默认值获取URL
-              url = os.environ.get('IP_LIST_URL', 'https://raw.githubusercontent.com/tianshipapa/cfipcaiji/refs/heads/main/ip.txt')
+          // 主函数
+          async function main() {
+            try {
+              // 从环境变量或默认值获取URL
+              const url = process.env.IP_LIST_URL || 'https://raw.githubusercontent.com/tianshipapa/cfipcaiji/refs/heads/main/ip.txt';
               
-              # 获取IP列表
-              ips = get_ips_from_url(url)
-              if not ips:
-                  print("没有获取到IP地址")
-                  return
+              // 获取IP列表
+              const ips = await getIpsFromUrl(url);
+              if (!ips || ips.length === 0) {
+                console.log('没有获取到IP地址');
+                return;
+              }
               
-              # 创建结果列表
-              results = []
-              for ip in ips:
-                  ip = ip.strip()
-                  if is_valid_ip(ip):
-                      country_code = get_ip_location(ip)
-                      results.append(f"{ip}#{country_code}")
-                      print(f"处理IP: {ip} -> {country_code}")
-                  elif ip:  # 跳过空行但记录无效IP
-                      print(f"无效的IP地址: {ip}")
+              // 创建结果列表
+              const results = [];
               
-              # 写入结果到ip.txt文件
-              with open('ip.txt', 'w', encoding='utf-8') as f:
-                  f.write('\n'.join(results))
+              // 逐个处理IP地址
+              for (const ip of ips) {
+                const trimmedIp = ip.trim();
+                if (trimmedIp && isValidIp(trimmedIp)) {
+                  const countryCode = await getIpLocation(trimmedIp);
+                  results.push(`${trimmedIp}#${countryCode}`);
+                  console.log(`处理IP: ${trimmedIp} -> ${countryCode}`);
+                } else if (trimmedIp) {  // 跳过空行但记录无效IP
+                  console.log(`无效的IP地址: ${trimmedIp}`);
+                }
+              }
               
-              print(f"共处理 {len(results)} 个有效IP地址，结果已保存到ip.txt")
+              // 写入结果到ip.txt文件
+              fs.writeFileSync('ip.txt', results.join('\n'), { encoding: 'utf-8' });
+              
+              console.log(`共处理 ${results.length} 个有效IP地址，结果已保存到ip.txt`);
+            } catch (error) {
+              console.error(`执行过程中发生错误: ${error.message}`);
+              process.exit(1);
+            }
+          }
           
-          if __name__ == "__main__":
-              main()
+          // 执行主函数
+          main();
           EOF
 
       # 可选：将结果提交回仓库
