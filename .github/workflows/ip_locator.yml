@@ -57,47 +57,128 @@ jobs:
             return pattern.test(ip);
           }
           
-          // 查询IP归属地
-          function getIpLocation(ip) {
+          // 延迟函数，用于控制请求频率
+          function delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+          }
+          
+          // 主查询函数 - 使用ip-api.com
+          async function queryWithIpApi(ip) {
             return new Promise((resolve) => {
               try {
-                // 使用HTTPS而不是HTTP，避免安全问题
-                const url = `https://ip-api.com/json/${ip}?fields=status,countryCode`;
-                https.get(url, (res) => {
+                const options = {
+                  hostname: 'ip-api.com',
+                  path: `/json/${ip}?fields=status,countryCode,message`,
+                  headers: {
+                    'User-Agent': 'IPLocationChecker/1.0 (Node.js)'
+                  }
+                };
+                
+                console.log(`Debug: 发送ip-api.com查询请求 for ${ip}`);
+                
+                const req = https.get(options, (res) => {
                   let data = '';
                   
-                  res.on('data', (chunk) => {
-                    data += chunk;
-                  });
+                  res.on('data', (chunk) => { data += chunk; });
                   
                   res.on('end', () => {
                     try {
-                      console.log(`Debug: 响应数据 for ${ip}: ${data}`); // 添加调试日志
+                      console.log(`Debug: ip-api.com响应数据 for ${ip}: ${data}`);
                       const result = JSON.parse(data);
                       
-                      // 修正大小写敏感性问题，统一返回小写'unknown'
-                      // 确保status字段存在且正确判断
                       if (result && result.status && result.status.toLowerCase() === 'success' && result.countryCode) {
-                        console.log(`Debug: ${ip} 归属地查询成功: ${result.countryCode}`);
-                        resolve(result.countryCode);
+                        console.log(`Debug: ip-api.com查询成功: ${ip} -> ${result.countryCode}`);
+                        resolve({ success: true, countryCode: result.countryCode });
                       } else {
-                        console.log(`Debug: ${ip} 归属地查询失败，响应状态: ${result?.status || 'undefined'}`);
-                        resolve('unknown');
+                        const errorMessage = result?.message || '未知错误';
+                        console.log(`Debug: ip-api.com查询失败，状态: ${result?.status || 'undefined'}，错误: ${errorMessage}`);
+                        resolve({ success: false, error: errorMessage });
                       }
                     } catch (error) {
-                      console.error(`解析IP ${ip} 归属地数据失败: ${error.message}`);
-                      resolve('unknown');
+                      console.error(`解析ip-api.com响应失败: ${error.message}`);
+                      resolve({ success: false, error: error.message });
                     }
                   });
                 }).on('error', (e) => {
-                  console.error(`查询IP ${ip} 归属地失败: ${e.message}`);
-                  resolve('unknown');
+                  console.error(`ip-api.com请求错误: ${e.message}`);
+                  resolve({ success: false, error: e.message });
                 });
               } catch (error) {
-                console.error(`查询IP ${ip} 归属地时发生错误: ${error.message}`);
-                resolve('unknown');
+                console.error(`ip-api.com调用异常: ${error.message}`);
+                resolve({ success: false, error: error.message });
               }
             });
+          }
+          
+          // 备用查询函数 - 使用ipinfo.io
+          async function queryWithIpInfo(ip) {
+            return new Promise((resolve) => {
+              try {
+                // 使用ipinfo.io的公共API，每天限制5000次请求
+                const options = {
+                  hostname: 'ipinfo.io',
+                  path: `/${ip}/country`,
+                  headers: {
+                    'User-Agent': 'IPLocationChecker/1.0 (Node.js)'
+                  }
+                };
+                
+                console.log(`Debug: 发送ipinfo.io备用查询请求 for ${ip}`);
+                
+                const req = https.get(options, (res) => {
+                  let data = '';
+                  
+                  res.on('data', (chunk) => { data += chunk; });
+                  
+                  res.on('end', () => {
+                    try {
+                      const countryCode = data.trim();
+                      if (countryCode && countryCode.length === 2 && /^[A-Z]{2}$/.test(countryCode)) {
+                        console.log(`Debug: ipinfo.io备用查询成功: ${ip} -> ${countryCode}`);
+                        resolve({ success: true, countryCode });
+                      } else {
+                        console.log(`Debug: ipinfo.io备用查询失败，返回数据: ${data}`);
+                        resolve({ success: false, error: '无效的国家代码' });
+                      }
+                    } catch (error) {
+                      console.error(`解析ipinfo.io响应失败: ${error.message}`);
+                      resolve({ success: false, error: error.message });
+                    }
+                  });
+                }).on('error', (e) => {
+                  console.error(`ipinfo.io请求错误: ${e.message}`);
+                  resolve({ success: false, error: e.message });
+                });
+              } catch (error) {
+                console.error(`ipinfo.io调用异常: ${error.message}`);
+                resolve({ success: false, error: error.message });
+              }
+            });
+          }
+          
+          // 查询IP归属地（带重试和备用API）
+          async function getIpLocation(ip) {
+            try {
+              // 添加随机延迟(100-300ms)，避免请求频率过高
+              const randomDelay = Math.floor(Math.random() * 200) + 100;
+              console.log(`Debug: IP ${ip} 查询前延迟 ${randomDelay}ms`);
+              await delay(randomDelay);
+              
+              // 首先尝试使用ip-api.com
+              let result = await queryWithIpApi(ip);
+              
+              // 如果失败，尝试使用备用API
+              if (!result.success) {
+                console.log(`Debug: ${ip} 主API查询失败，尝试备用API...`);
+                await delay(100); // 再次延迟
+                result = await queryWithIpInfo(ip);
+              }
+              
+              return result.success ? result.countryCode : 'unknown';
+            } catch (error) {
+              console.error(`查询IP ${ip} 归属地时发生异常: ${error.message}`);
+              return 'unknown';
+            }
           }
           
           // 主函数
