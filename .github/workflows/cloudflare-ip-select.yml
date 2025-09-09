@@ -1,0 +1,143 @@
+# Cloudflare IP 优选 GitHub Actions 工作流
+name: Cloudflare IP 优选
+
+# 触发条件
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      port:
+        description: '测试端口'
+        required: false
+        default: '443'
+      count:
+        description: '保存的IP数量'
+        required: false
+        default: '16'
+  
+  # 定时触发 (每天凌晨2点)
+  schedule:
+    - cron: '0 2 * * *'
+
+# 工作流权限
+permissions:
+  contents: write  # 用于保存结果文件
+  actions: read    # 用于读取工作流信息
+
+# 工作流作业
+jobs:
+  select-cloudflare-ips:
+    # 运行环境
+    runs-on: ubuntu-latest
+    
+    # 输出结果
+    outputs:
+      best_ips: ${{ steps.select-ips.outputs.best_ips }}
+      best_ip: ${{ steps.select-ips.outputs.best_ip }}
+      ip_count: ${{ steps.select-ips.outputs.ip_count }}
+    
+    steps:
+      # 1. 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      
+      # 2. 设置Node.js环境
+      - name: 设置Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      # 3. 安装必要依赖
+      - name: 安装依赖
+        run: |
+          # 安装minimist用于解析命令行参数
+          npm install minimist --global
+          
+          # 确保脚本有执行权限
+          chmod +x ./cloudflare-ip-selector.js
+      
+      # 4. 执行IP优选脚本
+      - name: 执行IP优选
+        id: select-ips
+        run: |
+          # 构建命令行参数
+          PORT="${{ github.event.inputs.port || '443' }}"
+          COUNT="${{ github.event.inputs.count || '16' }}"
+          
+          # 执行脚本 (固定使用CM整理的IP列表)
+          node ./cloudflare-ip-selector.js --port "$PORT" --count "$COUNT" --output "best-ips.txt"
+      
+      # 5. 保存结果为Artifact
+      - name: 保存IP结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: best-cloudflare-ips
+          path: best-ips.txt
+          retention-days: 7  # 保留7天
+      
+      # 6. 更新README或结果文件(可选)
+      - name: 更新结果文件
+        if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+        run: |
+          # 创建或更新结果文件
+          RESULT_FILE="CLOUDFLARE_BEST_IPS.md"
+          
+          echo "# Cloudflare 最优IP列表 ($(date +'%Y-%m-%d %H:%M:%S'))" > $RESULT_FILE
+          echo "" >> $RESULT_FILE
+          echo "## 配置信息" >> $RESULT_FILE
+          echo "- IP来源: CM整理列表 (固定)" >> $RESULT_FILE
+          echo "- 测试端口: ${{ github.event.inputs.port || '443' }}" >> $RESULT_FILE
+          echo "- 选择数量: ${{ github.event.inputs.count || '16' }}" >> $RESULT_FILE
+          echo "- 生成时间: $(date +'%Y-%m-%d %H:%M:%S')" >> $RESULT_FILE
+          echo "" >> $RESULT_FILE
+          echo "## 最优IP列表" >> $RESULT_FILE
+          echo "```" >> $RESULT_FILE
+          cat best-ips.txt >> $RESULT_FILE
+          echo "```" >> $RESULT_FILE
+      
+      # 7. 提交结果文件(可选)
+      - name: 提交结果更新
+        if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update Cloudflare best IPs"
+          file_pattern: CLOUDFLARE_BEST_IPS.md
+          commit_user_name: 'GitHub Actions'
+          commit_user_email: 'actions@github.com'
+          commit_author: 'GitHub Actions <actions@github.com>'
+
+  # 可选：通知作业 - 例如发送邮件或消息通知
+  notify-results:
+    needs: select-cloudflare-ips
+    runs-on: ubuntu-latest
+    if: ${{ needs.select-cloudflare-ips.outputs.ip_count > 0 }}
+    steps:
+      # 这里可以添加通知逻辑，如发送邮件、Slack消息等
+      # 示例: 输出结果到日志
+      - name: 输出优选结果
+        run: |
+          echo "找到 ${{ needs.select-cloudflare-ips.outputs.ip_count }} 个最优IP"
+          echo "最优IP: ${{ needs.select-cloudflare-ips.outputs.best_ip }}"
+          echo "所有优选IP: ${{ needs.select-cloudflare-ips.outputs.best_ips }}"
+
+  # 可选：部署作业 - 例如将结果应用到其他系统
+  deploy-ips:
+    needs: select-cloudflare-ips
+    runs-on: ubuntu-latest
+    if: ${{ needs.select-cloudflare-ips.outputs.ip_count > 0 }}
+    steps:
+      # 这里可以添加部署逻辑，如更新配置文件、通知其他系统等
+      # 示例: 创建一个简单的配置文件
+      - name: 创建配置文件
+        run: |
+          echo "# Cloudflare 优选IP配置" > cloudflare-config.txt
+          echo "# 生成时间: $(date +'%Y-%m-%d %H:%M:%S')" >> cloudflare-config.txt
+          echo "" >> cloudflare-config.txt
+          
+          # 分割IP列表并添加到配置文件
+          IFS=',' read -ra IPS <<< "${{ needs.select-cloudflare-ips.outputs.best_ips }}"
+          for ip in "${IPS[@]}"; do
+            echo "IP=${ip}" >> cloudflare-config.txt
+          done
