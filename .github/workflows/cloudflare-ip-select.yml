@@ -89,35 +89,71 @@ jobs:
             local network_part=$(echo $cidr | cut -d'/' -f1)
             local prefix=$(echo $cidr | cut -d'/' -f2)
             
+            # 确保prefix是有效的数字
+            if ! [[ "$prefix" =~ ^[0-9]+$ ]] || [ "$prefix" -lt 8 ] || [ "$prefix" -gt 30 ]; then
+              echo ""  # 返回空值表示无效的prefix
+              return
+            fi
+            
+            # 使用bc工具进行大整数运算，避免Bash算术运算的限制
             # 计算子网掩码
-            local mask=$((0xffffffff << (32 - prefix)))
+            local mask=$(bc <<< "ibase=16; FFFFFFFF << (32 - $prefix); obase=16")
             
             # 将IP转换为整数
             IFS='.' read -r -a ip_parts <<< "$network_part"
-            local ip_int=$(( (ip_parts[0] << 24) | (ip_parts[1] << 16) | (ip_parts[2] << 8) | ip_parts[3] ))
+            # 确保IP的每个部分都是有效的数字
+            if ! [[ "${ip_parts[0]}" =~ ^[0-9]+$ ]] || ! [[ "${ip_parts[1]}" =~ ^[0-9]+$ ]] || \
+               ! [[ "${ip_parts[2]}" =~ ^[0-9]+$ ]] || ! [[ "${ip_parts[3]}" =~ ^[0-9]+$ ]]; then
+              echo ""  # 返回空值表示无效的IP
+              return
+            fi
             
-            # 计算网络地址
-            local network_int=$((ip_int & mask))
+            # 使用bc计算IP整数表示
+            local ip_int=$(bc <<< "ibase=10; ${ip_parts[0]}*16777216 + ${ip_parts[1]}*65536 + ${ip_parts[2]}*256 + ${ip_parts[3]}; obase=16")
+            
+            # 计算网络地址 (使用bc进行位运算)
+            local network_int=$(bc <<< "ibase=16; $ip_int & $mask; obase=16")
             
             # 计算可用IP范围
-            local host_range=$((0xffffffff ^ mask))
-            local min_ip=$((network_int + 1))  # 排除网络地址
-            local max_ip=$((network_int + host_range - 1))  # 排除广播地址
+            local host_range=$(bc <<< "ibase=16; FFFFFFFF ^ $mask; obase=16")
+            # 转换为十进制进行比较和计算
+            local network_int_dec=$(bc <<< "ibase=16; $network_int")
+            local host_range_dec=$(bc <<< "ibase=16; $host_range")
+            local min_ip_dec=$((network_int_dec + 1))  # 排除网络地址
+            local max_ip_dec=$((network_int_dec + host_range_dec - 1))  # 排除广播地址
             
             # 如果没有可用IP，返回空
             if [ $min_ip -gt $max_ip ]; then
               return
             fi
             
-            # 生成随机IP
-            local random_offset=$((RANDOM % (max_ip - min_ip + 1)))
-            local random_ip_int=$((min_ip + random_offset))
+            # 确保有可用IP
+            if [ $min_ip_dec -gt $max_ip_dec ]; then
+              echo ""  # 返回空值表示没有可用IP
+              return
+            fi
             
-            # 将整数转换回IP
-            local octet1=$(( (random_ip_int >> 24) & 0xff ))
-            local octet2=$(( (random_ip_int >> 16) & 0xff ))
-            local octet3=$(( (random_ip_int >> 8) & 0xff ))
-            local octet4=$(( random_ip_int & 0xff ))
+            # 生成随机IP偏移量
+            local random_offset=$((RANDOM % (max_ip_dec - min_ip_dec + 1)))
+            local random_ip_dec=$((min_ip_dec + random_offset))
+            
+            # 将十进制IP转换回点分十进制格式
+            # 计算各个八位组的值
+            local octet1=$((random_ip_dec / 16777216))
+            local remaining1=$((random_ip_dec % 16777216))
+            local octet2=$((remaining1 / 65536))
+            local remaining2=$((remaining1 % 65536))
+            local octet3=$((remaining2 / 256))
+            local octet4=$((remaining2 % 256))
+            
+            # 验证每个八位组在有效范围内
+            if [ $octet1 -lt 0 ] || [ $octet1 -gt 255 ] || \
+               [ $octet2 -lt 0 ] || [ $octet2 -gt 255 ] || \
+               [ $octet3 -lt 0 ] || [ $octet3 -gt 255 ] || \
+               [ $octet4 -lt 0 ] || [ $octet4 -gt 255 ]; then
+              echo ""  # 返回空值表示无效的IP
+              return
+            fi
             
             echo "$octet1.$octet2.$octet3.$octet4"
           }
