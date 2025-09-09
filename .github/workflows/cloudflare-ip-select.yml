@@ -1,4 +1,5 @@
 # Cloudflare IP 优选 GitHub Actions 工作流
+# 完全使用Bash脚本实现，无需JavaScript依赖
 name: Cloudflare IP 优选
 
 # 触发条件
@@ -14,6 +15,14 @@ on:
         description: '保存的IP数量'
         required: false
         default: '16'
+      concurrency:
+        description: '并发数'
+        required: false
+        default: '32'
+      timeout:
+        description: '超时时间(ms)'
+        required: false
+        default: '5000'
   
   # 定时触发 (每天凌晨2点)
   schedule:
@@ -37,37 +46,220 @@ jobs:
       ip_count: ${{ steps.select-ips.outputs.ip_count }}
     
     steps:
-      # 1. 检出代码
+      # 1. 检出代码（如果需要访问仓库中的其他文件）
       - name: 检出代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
       
-      # 2. 设置Node.js环境
-      - name: 设置Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      
-      # 3. 安装必要依赖
-      - name: 安装依赖
+      # 2. 安装必要工具
+      - name: 安装必要工具
         run: |
-          # 安装minimist用于解析命令行参数
-          npm install minimist --global
-          
-          # 确保脚本有执行权限
-          chmod +x ./cloudflare-ip-selector.js
+          sudo apt-get update
+          sudo apt-get install -y jq parallel curl bc
       
-      # 4. 执行IP优选脚本
-      - name: 执行IP优选
+      # 3. 创建并执行IP优选Bash脚本
+      - name: 执行IP优选 (使用Bash实现)
         id: select-ips
         run: |
-          # 构建命令行参数
+          # 配置参数
           PORT="${{ github.event.inputs.port || '443' }}"
           COUNT="${{ github.event.inputs.count || '16' }}"
+          CONCURRENCY="${{ github.event.inputs.concurrency || '32' }}"
+          TIMEOUT="${{ github.event.inputs.timeout || '5000' }}"
+          OUTPUT_FILE="best-ips.txt"
+          NIP_DOMAIN="nip.090227.xyz"
           
-          # 执行脚本 (固定使用CM整理的IP列表)
-          node ./cloudflare-ip-selector.js --port "$PORT" --count "$COUNT" --output "best-ips.txt"
+          echo "Cloudflare IP优选工具启动"
+          echo "配置参数: 端口=${PORT}, 选择数量=${COUNT}, 并发数=${CONCURRENCY}, 超时=${TIMEOUT}ms"
+          
+          # 步骤1: 获取CM整理的IP列表
+          echo "开始加载CM整理的IP列表 (端口: ${PORT})"
+          CF_CIDR_LIST=$(curl -sS --max-time 10 "https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR.txt" || echo "173.245.48.0/20\n103.21.244.0/22\n103.22.200.0/22\n103.31.4.0/22\n141.101.64.0/18\n108.162.192.0/18\n190.93.240.0/20\n188.114.96.0/20\n197.234.240.0/22\n198.41.128.0/17\n162.158.0.0/15\n104.16.0.0/13\n104.24.0.0/14\n172.64.0.0/13\n131.0.72.0/22")
+          
+          # 过滤有效CIDR
+          CIDRS=($(echo "${CF_CIDR_LIST}" | grep -v '^#' | grep -v '^$' | tr -d '[:space:]'))
+          
+          # 步骤2: 从CIDR生成随机IP
+          echo "从${#CIDRS[@]}个CIDR生成随机IP..."
+          
+          # CIDR转随机IP的函数
+          generate_random_ip_from_cidr() {
+            local cidr="$1"
+            local network_part=$(echo $cidr | cut -d'/' -f1)
+            local prefix=$(echo $cidr | cut -d'/' -f2)
+            
+            # 计算子网掩码
+            local mask=$((0xffffffff << (32 - prefix)))
+            
+            # 将IP转换为整数
+            IFS='.' read -r -a ip_parts <<< "$network_part"
+            local ip_int=$(( (ip_parts[0] << 24) | (ip_parts[1] << 16) | (ip_parts[2] << 8) | ip_parts[3] ))
+            
+            # 计算网络地址
+            local network_int=$((ip_int & mask))
+            
+            # 计算可用IP范围
+            local host_range=$((0xffffffff ^ mask))
+            local min_ip=$((network_int + 1))  # 排除网络地址
+            local max_ip=$((network_int + host_range - 1))  # 排除广播地址
+            
+            # 如果没有可用IP，返回空
+            if [ $min_ip -gt $max_ip ]; then
+              return
+            fi
+            
+            # 生成随机IP
+            local random_offset=$((RANDOM % (max_ip - min_ip + 1)))
+            local random_ip_int=$((min_ip + random_offset))
+            
+            # 将整数转换回IP
+            local octet1=$(( (random_ip_int >> 24) & 0xff ))
+            local octet2=$(( (random_ip_int >> 16) & 0xff ))
+            local octet3=$(( (random_ip_int >> 8) & 0xff ))
+            local octet4=$(( random_ip_int & 0xff ))
+            
+            echo "$octet1.$octet2.$octet3.$octet4"
+          }
+          
+          # 生成IP列表
+          IPS=()
+          TARGET_COUNT=512
+          ROUND=1
+          
+          while [ ${#IPS[@]} -lt $TARGET_COUNT ] && [ $ROUND -le 100 ]; do
+            echo "第${ROUND}轮生成IP，当前已有${#IPS[@]}个"
+            
+            for cidr in "${CIDRS[@]}"; do
+              if [ ${#IPS[@]} -ge $TARGET_COUNT ]; then
+                break
+              fi
+              
+              # 每轮为每个CIDR生成一些IP
+              local new_ips=()
+              for ((i=0; i<$ROUND; i++)); do
+                local ip=$(generate_random_ip_from_cidr "$cidr")
+                if [ -n "$ip" ]; then
+                  new_ips+=($ip)
+                fi
+              done
+              
+              # 添加到总列表并去重
+              for ip in "${new_ips[@]}"; do
+                if [[ ! " ${IPS[*]} " =~ " $ip " ]]; then
+                  IPS+=($ip)
+                fi
+              done
+            done
+            
+            ROUND=$((ROUND + 1))
+          done
+          
+          # 限制IP数量
+          IPS=(${IPS[@]:0:$TARGET_COUNT})
+          echo "最终生成${#IPS[@]}个不重复IP"
+          
+          # 步骤3: 测试IP延迟
+          echo "开始测试IP延迟 (并发数: $CONCURRENCY, 超时: $TIMEOUT ms)"
+          
+          # 创建临时文件存储结果
+          RESULTS_FILE=$(mktemp)
+          
+          # 定义测试单个IP的函数
+          test_single_ip() {
+            local ip=$1
+            local port=$2
+            local timeout=$3
+            local result_file=$4
+            
+            # 构建测试URL
+            local hex_parts=()
+            IFS='.' read -r -a ip_parts <<< "$ip"
+            for part in "${ip_parts[@]}"; do
+              hex_parts+=($(printf '%02x' "$part"))
+            done
+            local nip=$(echo "${hex_parts[*]}" | tr -d ' ')
+            local test_url="https://${nip}.${NIP_DOMAIN}:${port}/cdn-cgi/trace"
+            
+            # 预请求以缓存DNS解析结果（不计入延迟）
+            curl -sS --max-time $((timeout / 1000)) --connect-timeout $((timeout / 1000)) --insecure "$test_url" > /dev/null 2>&1
+            
+            # 正式测试并测量延迟
+            local start_time=$(date +%s%3N)
+            local response=$(curl -sS --max-time $((timeout / 1000)) --connect-timeout $((timeout / 1000)) --insecure "$test_url" 2>&1)
+            local end_time=$(date +%s%3N)
+            local latency=$((end_time - start_time))
+            
+            # 检查是否超时或失败
+            if [[ $latency -ge $timeout ]] || [[ $response == *"curl: ("* ]] || [[ -z $response ]]; then
+              echo "IP $ip:$port 测试失败或超时 ($latency ms)" >&2
+              return 1
+            fi
+            
+            # 解析响应获取colo信息
+            local colo=$(echo "$response" | grep '^colo=' | cut -d'=' -f2)
+            local resp_ip=$(echo "$response" | grep '^ip=' | cut -d'=' -f2)
+            
+            if [ -z "$colo" ] || [ -z "$resp_ip" ]; then
+              echo "IP $ip:$port 响应解析失败" >&2
+              return 1
+            fi
+            
+            # 判断IP类型
+            local ip_type="official"
+            if [[ $resp_ip == *":"* ]] || [[ $resp_ip == $ip ]]; then
+              ip_type="proxy"
+            fi
+            
+            # 记录结果
+            echo "$latency,$ip,$port,$colo,$ip_type" >> "$result_file"
+            echo "IP $ip:$port 测试成功: $latency ms, colo: $colo, 类型: $ip_type"
+            return 0
+          }
+          
+          # 设置并行运行
+          export -f test_single_ip
+          export NIP_DOMAIN
+          
+          # 使用parallel进行并发测试
+          echo "${IPS[@]}" | tr ' ' '\n' | parallel -j $CONCURRENCY --progress "test_single_ip {} $PORT $TIMEOUT $RESULTS_FILE"
+          
+          # 步骤4: 处理结果
+          local valid_results=$(wc -l < "$RESULTS_FILE")
+          echo "测试完成，找到 $valid_results 个有效IP"
+          
+          if [ $valid_results -eq 0 ]; then
+            echo "没有找到有效的IP，程序退出" >&2
+            exit 1
+          fi
+          
+          # 按延迟排序并选择最优IP
+          echo "前${COUNT}个最优IP："
+          local best_ips=()
+          local counter=1
+          
+          # 排序并提取结果
+          sort -n "$RESULTS_FILE" | head -n $COUNT | while IFS=',' read -r latency ip port colo ip_type; do
+            local type_text="官方优选"
+            if [ "$ip_type" = "proxy" ]; then
+              type_text="反代优选"
+            fi
+            echo "${counter}. ${ip}:${port}#${colo} ${type_text} ${latency}ms"
+            best_ips+=("${ip}:${port}")
+            counter=$((counter + 1))
+          done
+          
+          # 保存结果到文件
+          echo "${best_ips[*]}" | tr ' ' '\n' > "$OUTPUT_FILE"
+          echo "已将前${#best_ips[@]}个最优IP保存到文件: $OUTPUT_FILE"
+          
+          # 输出GitHub Actions友好的结果
+          best_ips_csv=$(echo "${best_ips[*]}" | tr ' ' ',')
+          echo "::set-output name=best_ips::${best_ips_csv}"
+          echo "::set-output name=best_ip::${best_ips[0]}"
+          echo "::set-output name=ip_count::${#best_ips[@]}"
+          
+          echo "程序执行完成"
       
       # 5. 保存结果为Artifact
       - name: 保存IP结果
