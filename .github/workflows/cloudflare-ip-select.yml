@@ -136,9 +136,9 @@ jobs:
               fi
               
               # 每轮为每个CIDR生成一些IP
-              local new_ips=()
+              new_ips=()  # 移除local关键字，因为这不在函数内
               for ((i=0; i<$ROUND; i++)); do
-                local ip=$(generate_random_ip_from_cidr "$cidr")
+                ip=$(generate_random_ip_from_cidr "$cidr")  # 移除local关键字
                 if [ -n "$ip" ]; then
                   new_ips+=($ip)
                 fi
@@ -225,7 +225,7 @@ jobs:
           echo "${IPS[@]}" | tr ' ' '\n' | parallel -j $CONCURRENCY --progress "test_single_ip {} $PORT $TIMEOUT $RESULTS_FILE"
           
           # 步骤4: 处理结果
-          local valid_results=$(wc -l < "$RESULTS_FILE")
+          valid_results=$(wc -l < "$RESULTS_FILE")  # 移除local关键字
           echo "测试完成，找到 $valid_results 个有效IP"
           
           if [ $valid_results -eq 0 ]; then
@@ -235,12 +235,12 @@ jobs:
           
           # 按延迟排序并选择最优IP
           echo "前${COUNT}个最优IP："
-          local best_ips=()
-          local counter=1
+          best_ips=()  # 移除local关键字
+          counter=1    # 移除local关键字
           
           # 排序并提取结果
           sort -n "$RESULTS_FILE" | head -n $COUNT | while IFS=',' read -r latency ip port colo ip_type; do
-            local type_text="官方优选"
+            type_text="官方优选"  # 这里可以保留local，因为这在while循环内
             if [ "$ip_type" = "proxy" ]; then
               type_text="反代优选"
             fi
