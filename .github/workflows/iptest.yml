@@ -1,0 +1,495 @@
+name: Cloudflare IP Test & Collection
+
+on:
+  schedule:
+    # 每天运行2次：0点、12点
+    - cron: '0 0,12 * * *'
+  workflow_dispatch:
+    inputs:
+      ip_source:
+        description: 'IP数据源'
+        required: true
+        default: 'cm'
+        type: choice
+        options:
+          - official
+          - as13335
+          - as209242
+          - as24429
+          - as35916
+          - as199524
+          - cm
+          - proxyip
+      target_port:
+        description: '目标端口'
+        required: false
+        default: '443'
+        type: string
+      max_ips:
+        description: '最大IP数量'
+        required: false
+        default: '512'
+        type: string
+      enable_save:
+        description: '保存结果到仓库'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  MAX_IPS: ${{ github.event.inputs.max_ips || '512' }}
+  TARGET_PORT: ${{ github.event.inputs.target_port || '443' }}
+  IP_SOURCE: ${{ github.event.inputs.ip_source || 'official' }}
+
+jobs:
+  collect-ips:
+    runs-on: ubuntu-latest
+    name: Collect Cloudflare IPs
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: |
+          npm install axios
+          npm install ip-cidr
+          npm install dns-packet
+          npm install node-fetch@2
+          
+      - name: Collect Cloudflare IPs
+        id: collect_ips
+        run: |
+          node -e "
+          const axios = require('axios');
+          const IPCIDR = require('ip-cidr');
+          const dnsPacket = require('dns-packet');
+          
+          // 配置参数
+          const MAX_IPS = parseInt(process.env.MAX_IPS);
+          const TARGET_PORT = process.env.TARGET_PORT;
+          const IP_SOURCE = process.env.IP_SOURCE;
+          
+          console.log('开始收集Cloudflare IP...');
+          console.log('数据源:', IP_SOURCE);
+          console.log('目标端口:', TARGET_PORT);
+          console.log('最大IP数量:', MAX_IPS);
+          
+          // IP验证函数
+          function isValidIP(ip) {
+            const ipRegex = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+            const match = ip.match(ipRegex);
+            if (!match) return false;
+            
+            for (let i = 1; i <= 4; i++) {
+              const num = parseInt(match[i]);
+              if (num < 0 || num > 255) return false;
+            }
+            return true;
+          }
+          
+          // 解析代理IP行
+          function parseProxyIPLine(line, targetPort) {
+            try {
+              line = line.trim();
+              if (!line) return null;
+              
+              let ip = '';
+              let port = '';
+              let comment = '';
+              
+              if (line.includes('#')) {
+                const parts = line.split('#');
+                const mainPart = parts[0].trim();
+                comment = parts[1].trim();
+                
+                if (mainPart.includes(':')) {
+                  const ipPortParts = mainPart.split(':');
+                  if (ipPortParts.length === 2) {
+                    ip = ipPortParts[0].trim();
+                    port = ipPortParts[1].trim();
+                  } else {
+                    return null;
+                  }
+                } else {
+                  ip = mainPart;
+                  port = '443';
+                }
+              } else {
+                if (line.includes(':')) {
+                  const ipPortParts = line.split(':');
+                  if (ipPortParts.length === 2) {
+                    ip = ipPortParts[0].trim();
+                    port = ipPortParts[1].trim();
+                  } else {
+                    return null;
+                  }
+                } else {
+                  ip = line;
+                  port = '443';
+                }
+              }
+              
+              if (!isValidIP(ip)) return null;
+              
+              const portNum = parseInt(port);
+              if (isNaN(portNum) || portNum < 1 || portNum > 65535) return null;
+              
+              if (port !== targetPort) return null;
+              
+              if (comment) {
+                return ip + ':' + port + '#' + comment;
+              } else {
+                return ip + ':' + port;
+              }
+            } catch (error) {
+              return null;
+            }
+          }
+          
+          // 从CIDR生成IP
+          function generateIPsFromCIDR(cidr, count = 1) {
+            try {
+              const cidrObj = new IPCIDR(cidr);
+              if (!cidrObj.isValid()) return [];
+              
+              const addresses = cidrObj.toArray();
+              if (!addresses || addresses.length === 0) return [];
+              
+              const maxHosts = addresses.length - 2;
+              if (maxHosts <= 0) return [];
+              
+              const actualCount = Math.min(count, maxHosts);
+              const ips = new Set();
+              
+              const availableIPs = addresses.slice(1, -1); // 排除网络地址和广播地址
+              
+              // 随机选择IP
+              while (ips.size < actualCount && availableIPs.length > 0) {
+                const randomIndex = Math.floor(Math.random() * availableIPs.length);
+                ips.add(availableIPs[randomIndex]);
+                availableIPs.splice(randomIndex, 1);
+              }
+              
+              return Array.from(ips);
+            } catch (error) {
+              return [];
+            }
+          }
+          
+          // 获取IP列表
+          async function getCFIPs(ipSource, targetPort) {
+            try {
+              let response;
+              let text = '';
+              
+              const sources = {
+                'official': 'https://www.cloudflare.com/ips-v4/',
+                'as13335': 'https://raw.githubusercontent.com/ipverse/asn-ip/master/as/13335/ipv4-aggregated.txt',
+                'as209242': 'https://raw.githubusercontent.com/ipverse/asn-ip/master/as/209242/ipv4-aggregated.txt',
+                'as24429': 'https://raw.githubusercontent.com/ipverse/asn-ip/master/as/24429/ipv4-aggregated.txt',
+                'as35916': 'https://raw.githubusercontent.com/ipverse/asn-ip/master/as/35916/ipv4-aggregated.txt',
+                'as199524': 'https://raw.githubusercontent.com/ipverse/asn-ip/master/as/199524/ipv4-aggregated.txt',
+                'cm': 'https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR.txt',
+                'proxyip': 'https://raw.githubusercontent.com/cmliu/ACL4SSR/main/baipiao.txt'
+              };
+              
+              if (ipSource === 'proxyip') {
+                response = await axios.get(sources[ipSource]);
+                if (response.status === 200) {
+                  const lines = response.data.split('\n')
+                    .map(line => line.trim())
+                    .filter(line => line && !line.startsWith('#'));
+                  
+                  const validIps = [];
+                  for (const line of lines) {
+                    const parsed = parseProxyIPLine(line, targetPort);
+                    if (parsed) validIps.push(parsed);
+                  }
+                  
+                  console.log(`反代IP解析完成，端口${targetPort}匹配到${validIps.length}个有效IP`);
+                  
+                  if (validIps.length > MAX_IPS) {
+                    const shuffled = [...validIps].sort(() => 0.5 - Math.random());
+                    return shuffled.slice(0, MAX_IPS);
+                  }
+                  return validIps;
+                }
+              } else {
+                response = await axios.get(sources[ipSource] || sources['official']);
+                text = response.status === 200 ? response.data : `173.245.48.0/20
+103.21.244.0/22
+103.22.200.0/22
+103.31.4.0/22
+141.101.64.0/18
+108.162.192.0/18
+190.93.240.0/20
+188.114.96.0/20
+197.234.240.0/22
+198.41.128.0/17
+162.158.0.0/15
+104.16.0.0/13
+104.24.0.0/14
+172.64.0.0/13
+131.0.72.0/22`;
+              }
+              
+              const cidrs = text.split('\n').filter(line => line.trim() && !line.startsWith('#'));
+              const ips = new Set();
+              let round = 1;
+              
+              while (ips.size < MAX_IPS) {
+                console.log(`第${round}轮生成IP，当前已有${ips.size}个`);
+                
+                for (const cidr of cidrs) {
+                  if (ips.size >= MAX_IPS) break;
+                  
+                  const cidrIPs = generateIPsFromCIDR(cidr.trim(), round);
+                  cidrIPs.forEach(ip => ips.add(ip));
+                }
+                
+                round++;
+                if (round > 100) {
+                  console.warn('达到最大轮次限制，停止生成');
+                  break;
+                }
+              }
+              
+              console.log(`最终生成${ips.size}个不重复IP`);
+              return Array.from(ips).slice(0, MAX_IPS);
+            } catch (error) {
+              console.error('获取CF IPs失败:', error.message);
+              return [];
+            }
+          }
+          
+          // 执行主逻辑
+          (async () => {
+            try {
+              const ips = await getCFIPs(IP_SOURCE, TARGET_PORT);
+              
+              // 保存结果到文件
+              const fs = require('fs');
+              const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+              const filename = `cf-ips-${IP_SOURCE}-${timestamp}.txt`;
+              
+              fs.writeFileSync(filename, ips.join('\n'));
+              console.log(`已保存${ips.length}个IP到 ${filename}`);
+              
+              // 设置输出变量
+              console.log(`::set-output name=ip_count::${ips.length}`);
+              console.log(`::set-output name=ip_source::${IP_SOURCE}`);
+              console.log(`::set-output name=filename::${filename}`);
+              console.log(`::set-output name=timestamp::${timestamp}`);
+              
+              // 创建最新文件
+              fs.writeFileSync('latest-cf-ips.txt', ips.join('\n'));
+              
+              process.exit(0);
+            } catch (error) {
+              console.error('执行失败:', error);
+              process.exit(1);
+            }
+          })();
+          "
+          
+      - name: Upload IP list as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-ips-${{ env.IP_SOURCE }}-${{ steps.collect_ips.outputs.timestamp }}
+          path: |
+            ${{ steps.collect_ips.outputs.filename }}
+            latest-cf-ips.txt
+          retention-days: 30
+          
+      - name: Commit IP list to repository
+        if: github.event.inputs.enable_save != 'false' && steps.collect_ips.outputs.ip_count > 0
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # 创建IP目录
+          mkdir -p ips/${{ env.IP_SOURCE }}
+          
+          # 复制最新IP列表
+          cp latest-cf-ips.txt ips/${{ env.IP_SOURCE }}/latest.txt
+          
+          # 创建带时间戳的备份
+          cp ${{ steps.collect_ips.outputs.filename }} ips/${{ env.IP_SOURCE }}/
+          
+          # 更新总的IP统计
+          echo "# Cloudflare IP Collection" > ips/README.md
+          echo "" >> ips/README.md
+          echo "## Latest Statistics" >> ips/README.md
+          echo "- **Source**: ${{ env.IP_SOURCE }}" >> ips/README.md
+          echo "- **Count**: ${{ steps.collect_ips.outputs.ip_count }} IPs" >> ips/README.md
+          echo "- **Port**: ${{ env.TARGET_PORT }}" >> ips/README.md
+          echo "- **Updated**: $(date -u)" >> ips/README.md
+          echo "" >> ips/README.md
+          echo "## Available Sources" >> ips/README.md
+          ls -1 ips/ | grep -v README.md | while read dir; do
+            count=$(wc -l < ips/$dir/latest.txt 2>/dev/null || echo "0")
+            echo "- **$dir**: $count IPs" >> ips/README.md
+          done
+          
+          # 提交更改
+          git add ips/
+          git commit -m "Update ${{ env.IP_SOURCE }} IPs - ${{ steps.collect_ips.outputs.ip_count }} IPs collected" || exit 0
+          
+      - name: Push changes
+        if: github.event.inputs.enable_save != 'false' && steps.collect_ips.outputs.ip_count > 0
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref }}
+          
+      - name: Create release
+        if: github.event.inputs.enable_save != 'false' && github.event_name == 'workflow_dispatch' && steps.collect_ips.outputs.ip_count > 0
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.IP_SOURCE }}-${{ steps.collect_ips.outputs.timestamp }}
+          name: ${{ env.IP_SOURCE }} IPs - ${{ steps.collect_ips.outputs.ip_count }} collected
+          body: |
+            ## IP Collection Report
+            
+            - **Source**: ${{ env.IP_SOURCE }}
+            - **Target Port**: ${{ env.TARGET_PORT }}
+            - **Collected IPs**: ${{ steps.collect_ips.outputs.ip_count }}
+            - **Collection Time**: ${{ steps.collect_ips.outputs.timestamp }}
+            
+            ### Files
+            - `latest-cf-ips.txt` - Latest IP list
+            - `${{ steps.collect_ips.outputs.filename }}` - Timestamped backup
+            
+            ### Usage
+            Download the IP lists from the artifacts or check the `ips/${{ env.IP_SOURCE }}/` directory.
+          files: |
+            latest-cf-ips.txt
+            ${{ steps.collect_ips.outputs.filename }}
+          draft: false
+          prerelease: false
+
+  test-ips:
+    runs-on: ubuntu-latest
+    name: Test Collected IPs
+    needs: collect-ips
+    if: always()
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Download latest IP list
+        uses: actions/download-artifact@v4
+        with:
+          name: cf-ips-${{ needs.collect-ips.outputs.ip_source }}-${{ needs.collect-ips.outputs.timestamp }}
+          path: ./
+          
+      - name: Test IP connectivity
+        run: |
+          if [ -f "latest-cf-ips.txt" ]; then
+            echo "Testing connectivity for collected IPs..."
+            
+            # 安装测试工具
+            sudo apt-get update
+            sudo apt-get install -y nmap curl
+            
+            # 测试前10个IP
+            head -10 latest-cf-ips.txt | while read ip; do
+              echo "Testing $ip..."
+              
+              # 基本ping测试
+              if ping -c 1 -W 3 "$ip" > /dev/null 2>&1; then
+                echo "✅ $ip - Ping OK"
+              else
+                echo "❌ $ip - Ping Failed"
+              fi
+              
+              # 端口测试（如果包含端口）
+              if [[ "$ip" == *":"* ]]; then
+                ip_addr=$(echo "$ip" | cut -d':' -f1)
+                port=$(echo "$ip" | cut -d':' -f2)
+                if nc -z -w 3 "$ip_addr" "$port" 2>/dev/null; then
+                  echo "✅ $ip - Port $port OK"
+                else
+                  echo "❌ $ip - Port $port Failed"
+                fi
+              else
+                # 测试443端口
+                if nc -z -w 3 "$ip" 443 2>/dev/null; then
+                  echo "✅ $ip:443 - Port OK"
+                else
+                  echo "❌ $ip:443 - Port Failed"
+                fi
+              fi
+              
+              echo "---"
+            done
+          else
+            echo "No IP list found, skipping tests"
+          fi
+
+  summary:
+    runs-on: ubuntu-latest
+    name: Generate Summary
+    needs: [collect-ips, test-ips]
+    if: always()
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Generate summary
+        run: |
+          echo "# Cloudflare IP Collection Summary" > summary.md
+          echo "" >> summary.md
+          echo "## Collection Results" >> summary.md
+          echo "- **Workflow**: ${{ github.workflow }}" >> summary.md
+          echo "- **Run**: ${{ github.run_number }}" >> summary.md
+          echo "- **Trigger**: ${{ github.event_name }}" >> summary.md
+          echo "- **Branch**: ${{ github.ref_name }}" >> summary.md
+          echo "" >> summary.md
+          
+          if [ "${{ needs.collect-ips.result }}" == "success" ]; then
+            echo "- **Collected IPs**: ${{ needs.collect-ips.outputs.ip_count }}" >> summary.md
+            echo "- **IP Source**: ${{ needs.collect-ips.outputs.ip_source }}" >> summary.md
+            echo "- **Collection Status**: ✅ Success" >> summary.md
+          else
+            echo "- **Collection Status**: ❌ Failed" >> summary.md
+          fi
+          
+          if [ "${{ needs.test-ips.result }}" == "success" ]; then
+            echo "- **Test Status**: ✅ Completed" >> summary.md
+          else
+            echo "- **Test Status**: ⚠️ Skipped or Failed" >> summary.md
+          fi
+          
+          echo "" >> summary.md
+          echo "## Available IP Lists" >> summary.md
+          if [ -d "ips" ]; then
+            find ips/ -name "latest.txt" -type f | while read file; do
+              source=$(dirname "$file" | sed 's/ips\///')
+              count=$(wc -l < "$file" 2>/dev/null || echo "0")
+              echo "- **$source**: $count IPs" >> summary.md
+            done
+          else
+            echo "- No IP lists found" >> summary.md
+          fi
+          
+          echo "" >> summary.md
+          echo "## Next Steps" >> summary.md
+          echo "1. Check the [Artifacts](../actions/runs/${{ github.run_id }}) for detailed IP lists" >> summary.md
+          echo "2. Review the [Repository](../tree/${{ github.ref_name }}/ips) for historical data" >> summary.md
+          echo "3. Re-run the workflow with different parameters if needed" >> summary.md
+          
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: collection-summary
+          path: summary.md
+          retention-days: 30
