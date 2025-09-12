@@ -9,7 +9,7 @@ on:
       ip_source:
         description: 'IP数据源'
         required: true
-        default: 'official'
+        default: 'cm'
         type: choice
         options:
           - official
