@@ -9,7 +9,7 @@ on:
       ip_source:
         description: 'IP数据源'
         required: true
-        default: 'cm'
+        default: 'official'
         type: choice
         options:
           - official
@@ -401,15 +401,15 @@ jobs:
 
             # 创建测试报告
             cat > test-report.md << 'EOF'
-            # IP Connectivity Test Report
-            **Generated at**: $(date -u)
-            **Test Configuration**: ${{ env.TARGET_PORT }}
+# IP Connectivity Test Report
+**Generated at**: $(date -u)
+**Test Configuration**: ${{ env.TARGET_PORT }}
 
-            ## Test Results
+## Test Results
 
-            | IP Address | Clean IP | Port | Ping Status | Port Status | Response Time | Notes |
-            |------------|----------|------|-------------|-------------|---------------|--------|
-            EOF
+| IP Address | Clean IP | Port | Ping Status | Port Status | Response Time | Notes |
+|------------|----------|------|-------------|-------------|---------------|--------|
+EOF
 
             # 使用临时文件存储统计
             echo "0" > /tmp/total_tested
@@ -510,51 +510,59 @@ jobs:
             fi
 
             # 生成详细汇总
-            cat >> test-report.md << EOF
+            cat >> test-report.md << 'EOF'
 
-            ## Test Summary
-            - **Total IPs Tested**: $total_tested
-            - **Ping Success**: $ping_success ($ping_rate%)
-            - **Port Success**: $port_success ($port_rate%)
-            - **Overall Usable**: $overall_rate%
+## Test Summary
+- **Total IPs Tested**: $total_tested
+- **Ping Success**: $ping_success ($ping_rate%)
+- **Port Success**: $port_success ($port_rate%)
+- **Overall Usable**: $overall_rate%
 
-            ## Network Analysis
-            $(if [ $ping_success -lt 5 ]; then echo "- ⚠️ Many IPs blocking ICMP ping (normal for Cloudflare)"; fi)
-            $(if [ $port_success -gt 10 ]; then echo "- ✅ Good port connectivity found"; fi)
-            $(if [ $port_success -lt 5 ]; then echo "- ⚠️ Low port connectivity, consider different target port"; fi)
+## Network Analysis
+EOF
 
-            ## Working IPs for Production
-            EOF
+            if [ $ping_success -lt 5 ]; then
+              echo "- ⚠️ Many IPs blocking ICMP ping (normal for Cloudflare)" >> test-report.md
+            fi
+            if [ $port_success -gt 10 ]; then
+              echo "- ✅ Good port connectivity found" >> test-report.md
+            fi
+            if [ $port_success -lt 5 ]; then
+              echo "- ⚠️ Low port connectivity, consider different target port" >> test-report.md
+            fi
+
+            cat >> test-report.md << 'EOF'
+
+## Working IPs for Production
+EOF
 
             # 提取成功的IP
             if [ -f "successful-ips.txt" ] && [ $(cat successful-ips.txt | wc -l) -gt 0 ]; then
               echo "### Successfully Connected IPs:" >> test-report.md
-              cat successful-ips.txt | head -10 | while read success_ip; do
-                echo "- $success_ip" >> test-report.md
-              done
-
+              head -10 successful-ips.txt >> test-report.md
+              
               echo "working_ips=$(cat successful-ips.txt | wc -l)" >> $GITHUB_OUTPUT
-
+              
               # 保存成功IP列表
               cp successful-ips.txt working-ips.txt
             else
               echo "- No successful connections found" >> test-report.md
               echo "working_ips=0" >> $GITHUB_OUTPUT
             fi
+            
+            cat >> test-report.md << 'EOF'
 
-            cat >> test-report.md << EOF
+## Usage Recommendations
+- Focus on port-successful IPs for actual deployment
+- Ping failures are normal for CDN edge IPs
+- Test with your specific application requirements
+- Consider geographic distribution for optimal performance
 
-            ## Usage Recommendations
-            - Focus on port-successful IPs for actual deployment
-            - Ping failures are normal for CDN edge IPs
-            - Test with your specific application requirements
-            - Consider geographic distribution for optimal performance
-
-            ## Next Steps
-            1. Save successful IPs to your application configuration
-            2. Monitor performance over time
-            3. Re-run tests periodically for updated results
-            EOF
+## Next Steps
+1. Save successful IPs to your application configuration
+2. Monitor performance over time
+3. Re-run tests periodically for updated results
+EOF
 
             # 设置输出变量
             echo "test_report=test-report.md" >> $GITHUB_OUTPUT
