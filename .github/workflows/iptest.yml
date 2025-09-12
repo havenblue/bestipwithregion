@@ -9,7 +9,7 @@ on:
       ip_source:
         description: 'IP数据源'
         required: true
-        default: 'official'
+        default: 'cm'
         type: choice
         options:
           - official
@@ -372,6 +372,13 @@ jobs:
     name: Test Collected IPs
     needs: collect-ips
     if: always()
+    outputs:
+      test_report: ${{ steps.test_ips.outputs.test_report }}
+      total_tested: ${{ steps.test_ips.outputs.total_tested }}
+      ping_success: ${{ steps.test_ips.outputs.ping_success }}
+      port_success: ${{ steps.test_ips.outputs.port_success }}
+      ping_rate: ${{ steps.test_ips.outputs.ping_rate }}
+      port_rate: ${{ steps.test_ips.outputs.port_rate }}
     
     steps:
       - name: Checkout repository
@@ -384,43 +391,210 @@ jobs:
           path: ./
           
       - name: Test IP connectivity
+        id: test_ips
         run: |
           if [ -f "latest-cf-ips.txt" ]; then
             echo "Testing connectivity for collected IPs..."
-            
+
             sudo apt-get update
-            sudo apt-get install -y nmap curl netcat-openbsd
-            
-            head -10 latest-cf-ips.txt | while read ip; do
-              echo "Testing $ip..."
-              
-              if ping -c 1 -W 3 "$ip" > /dev/null 2>&1; then
-                echo "✅ $ip - Ping OK"
+            sudo apt-get install -y nmap curl netcat-openbsd bc
+
+            # 创建测试报告
+            cat > test-report.md << 'EOF'
+            # IP Connectivity Test Report
+            **Generated at**: $(date -u)
+            **Test Configuration**: ${{ env.TARGET_PORT }}
+
+            ## Test Results
+
+            | IP Address | Clean IP | Port | Ping Status | Port Status | Response Time | Notes |
+            |------------|----------|------|-------------|-------------|---------------|--------|
+            EOF
+
+            # 使用临时文件存储统计
+            echo "0" > /tmp/total_tested
+            echo "0" > /tmp/ping_success
+            echo "0" > /tmp/port_success
+
+            # 创建测试IP文件
+            head -20 latest-cf-ips.txt > test-ips.txt
+
+            # 测试IP，使用更智能的测试
+            while IFS= read -r line; do
+              [ -z "$line" ] && continue
+
+              # 清理IP地址
+              clean_ip=$(echo "$line" | sed 's/:.*//g' | sed 's/#.*//g' | xargs)
+
+              # 端口测试
+              if [[ "$line" == *":"* ]]; then
+                port=$(echo "$line" | cut -d':' -f2 | cut -d'#' -f1 | xargs)
               else
-                echo "❌ $ip - Ping Failed"
+                port="443"
               fi
-              
-              if [[ "$ip" == *":"* ]]; then
-                ip_addr=$(echo "$ip" | cut -d':' -f1)
-                port=$(echo "$ip" | cut -d':' -f2)
-                if nc -z -w 3 "$ip_addr" "$port" 2>/dev/null; then
-                  echo "✅ $ip - Port $port OK"
-                else
-                  echo "❌ $ip - Port $port Failed"
-                fi
+
+              echo "Testing: $line → $clean_ip:$port"
+
+              # 智能ping测试（跳过ICMP被阻止的情况）
+              ping_status="⏭️"
+              ping_time=""
+
+              # 先尝试快速ping
+              if timeout 3 ping -c 1 -W 2 "$clean_ip" > /dev/null 2>&1; then
+                ping_time="$(timeout 3 ping -c 1 -W 2 "$clean_ip" 2>/dev/null | grep 'time=' | sed 's/.*time=\([0-9.]*\).*/\1/')"
+                ping_status="✅"
+                echo $(( $(cat /tmp/ping_success) + 1 )) > /tmp/ping_success
               else
-                if nc -z -w 3 "$ip" 443 2>/dev/null; then
-                  echo "✅ $ip:443 - Port OK"
+                # ICMP可能被阻止，标记为跳过
+                ping_status="⏭️ (ICMP blocked)"
+              fi
+
+              # 增强端口测试（多种方法）
+              port_status="❌"
+              port_time=""
+
+              # 方法1: 直接TCP连接
+              if timeout 4 bash -c "echo >/dev/tcp/$clean_ip/$port" 2>/dev/null; then
+                port_status="✅"
+                port_time="<1s"
+                echo $(( $(cat /tmp/port_success) + 1 )) > /tmp/port_success
+              else
+                # 方法2: curl HTTPS测试
+                if curl -s -o /dev/null -w "%{time_total}" --max-time 6 --connect-timeout 4 "https://$clean_ip:$port" --resolve "$clean_ip:$port:$clean_ip" 2>/dev/null; then
+                  port_status="✅ (HTTPS)"
+                  port_time="$(curl -s -o /dev/null -w "%{time_total}" --max-time 6 --connect-timeout 4 "https://$clean_ip:$port" --resolve "$clean_ip:$port:$clean_ip" 2>/dev/null)"
+                  echo $(( $(cat /tmp/port_success) + 1 )) > /tmp/port_success
                 else
-                  echo "❌ $ip:443 - Port Failed"
+                  # 方法3: 基本TCP测试
+                  if nc -z -w 3 "$clean_ip" "$port" 2>/dev/null; then
+                    port_status="✅ (TCP)"
+                    port_time="<1s"
+                    echo $(( $(cat /tmp/port_success) + 1 )) > /tmp/port_success
+                  else
+                    # 方法4: 检查是否开放但无响应
+                    if nmap -p "$port" --host-timeout 3s "$clean_ip" 2>/dev/null | grep -q "open"; then
+                      port_status="⚠️ (Open but no response)"
+                      port_time="N/A"
+                    fi
+                  fi
                 fi
               fi
-              
-              echo "---"
-            done
+
+              # 更新总计
+              echo $(( $(cat /tmp/total_tested) + 1 )) > /tmp/total_tested
+
+              # 添加到报告
+              echo "| $line | $clean_ip | $port | $ping_status | $port_status | ${ping_time:-${port_time:-N/A}} | - |" >> test-report.md
+
+              # 保存成功的IP
+              if [[ "$port_status" == *"✅"* ]]; then
+                echo "$clean_ip:$port" >> successful-ips.txt
+              fi
+
+            done < test-ips.txt
+
+            # 读取统计结果
+            total_tested=$(cat /tmp/total_tested)
+            ping_success=$(cat /tmp/ping_success)
+            port_success=$(cat /tmp/port_success)
+
+            # 计算成功率
+            if [ $total_tested -gt 0 ]; then
+              ping_rate=$(awk "BEGIN {printf \"%.1f\", $ping_success * 100 / $total_tested}")
+              port_rate=$(awk "BEGIN {printf \"%.1f\", $port_success * 100 / $total_tested}")
+              overall_rate=$(awk "BEGIN {printf \"%.1f\", $port_success * 100 / $total_tested}")
+            else
+              ping_rate="0.0"
+              port_rate="0.0"
+              overall_rate="0.0"
+            fi
+
+            # 生成详细汇总
+            cat >> test-report.md << EOF
+
+            ## Test Summary
+            - **Total IPs Tested**: $total_tested
+            - **Ping Success**: $ping_success ($ping_rate%)
+            - **Port Success**: $port_success ($port_rate%)
+            - **Overall Usable**: $overall_rate%
+
+            ## Network Analysis
+            $(if [ $ping_success -lt 5 ]; then echo "- ⚠️ Many IPs blocking ICMP ping (normal for Cloudflare)"; fi)
+            $(if [ $port_success -gt 10 ]; then echo "- ✅ Good port connectivity found"; fi)
+            $(if [ $port_success -lt 5 ]; then echo "- ⚠️ Low port connectivity, consider different target port"; fi)
+
+            ## Working IPs for Production
+            EOF
+
+            # 提取成功的IP
+            if [ -f "successful-ips.txt" ] && [ $(cat successful-ips.txt | wc -l) -gt 0 ]; then
+              echo "### Successfully Connected IPs:" >> test-report.md
+              cat successful-ips.txt | head -10 | while read success_ip; do
+                echo "- $success_ip" >> test-report.md
+              done
+
+              echo "working_ips=$(cat successful-ips.txt | wc -l)" >> $GITHUB_OUTPUT
+
+              # 保存成功IP列表
+              cp successful-ips.txt working-ips.txt
+            else
+              echo "- No successful connections found" >> test-report.md
+              echo "working_ips=0" >> $GITHUB_OUTPUT
+            fi
+
+            cat >> test-report.md << EOF
+
+            ## Usage Recommendations
+            - Focus on port-successful IPs for actual deployment
+            - Ping failures are normal for CDN edge IPs
+            - Test with your specific application requirements
+            - Consider geographic distribution for optimal performance
+
+            ## Next Steps
+            1. Save successful IPs to your application configuration
+            2. Monitor performance over time
+            3. Re-run tests periodically for updated results
+            EOF
+
+            # 设置输出变量
+            echo "test_report=test-report.md" >> $GITHUB_OUTPUT
+            echo "total_tested=$total_tested" >> $GITHUB_OUTPUT
+            echo "ping_success=$ping_success" >> $GITHUB_OUTPUT
+            echo "port_success=$port_success" >> $GITHUB_OUTPUT
+            echo "ping_rate=$ping_rate" >> $GITHUB_OUTPUT
+            echo "port_rate=$port_rate" >> $GITHUB_OUTPUT
+            echo "overall_rate=$overall_rate" >> $GITHUB_OUTPUT
+
+            echo "✅ Enhanced connectivity test completed!"
+            echo "=== TEST RESULTS ==="
+            cat test-report.md
+
           else
             echo "No IP list found, skipping tests"
+            echo "test_report=none" >> $GITHUB_OUTPUT
+            echo "total_tested=0" >> $GITHUB_OUTPUT
+            echo "working_ips=0" >> $GITHUB_OUTPUT
           fi
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ip-test-results-${{ github.run_number }}
+          path: |
+            test-report.md
+            working-ips.txt
+            successful-ips.txt
+            test-ips.txt
+          retention-days: 30
+
+      - name: Upload successful IPs
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: working-ips-${{ github.run_number }}
+          path: working-ips.txt
+          retention-days: 7
 
   summary:
     runs-on: ubuntu-latest
