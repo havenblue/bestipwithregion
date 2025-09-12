@@ -69,7 +69,6 @@ jobs:
         run: |
           node -e '
           const axios = require("axios");
-          const IPCIDR = require("ip-cidr");
           
           const MAX_IPS = parseInt(process.env.MAX_IPS);
           const TARGET_PORT = process.env.TARGET_PORT;
@@ -152,19 +151,42 @@ jobs:
           
           function generateIPsFromCIDR(cidr, count = 1) {
             try {
-              const cidrObj = new IPCIDR(cidr);
-              if (!cidrObj.isValid()) return [];
+              const [network, prefix] = cidr.split("/");
+              const prefixNum = parseInt(prefix);
               
-              const addresses = cidrObj.toArray();
-              if (!addresses || addresses.length === 0) return [];
+              if (prefixNum < 0 || prefixNum > 32) return [];
               
-              const maxHosts = addresses.length - 2;
+              const ipToNum = (ip) => {
+                return ip.split(".").reduce((acc, octet, index) => {
+                  return acc + (parseInt(octet) << (8 * (3 - index)));
+                }, 0);
+              };
+              
+              const numToIp = (num) => {
+                return [
+                  (num >>> 24) & 255,
+                  (num >>> 16) & 255,
+                  (num >>> 8) & 255,
+                  num & 255
+                ].join(".");
+              };
+              
+              const networkNum = ipToNum(network);
+              const hostBits = 32 - prefixNum;
+              const maxHosts = Math.pow(2, hostBits) - 2;
+              
               if (maxHosts <= 0) return [];
               
               const actualCount = Math.min(count, maxHosts);
               const ips = new Set();
               
-              const availableIPs = addresses.slice(1, -1);
+              const startHost = networkNum + 1;
+              const endHost = networkNum + maxHosts;
+              
+              const availableIPs = [];
+              for (let i = startHost; i <= endHost; i++) {
+                availableIPs.push(numToIp(i));
+              }
               
               while (ips.size < actualCount && availableIPs.length > 0) {
                 const randomIndex = Math.floor(Math.random() * availableIPs.length);
