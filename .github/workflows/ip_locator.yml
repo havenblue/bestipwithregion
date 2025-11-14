@@ -185,7 +185,7 @@ jobs:
           async function main() {
             try {
               // 从环境变量或默认值获取URL
-              const url = process.env.IP_LIST_URL || 'https://raw.githubusercontent.com/tianshipapa/cfipcaiji/refs/heads/main/ip.txt';
+              const url = process.env.IP_LIST_URL || 'https://ipdb.api.030101.xyz/?type=bestcf';
               console.log(`Debug: 使用的IP列表URL: ${url}`);
                
               // 获取IP列表
